@@ -1,11 +1,18 @@
 using Microsoft.AspNetCore.Mvc;
 using System.Net;
 using System.Text.Json;
-using System.IO;
+using System.Data;
+using System.Data.SqlClient;
+using System.Xml;
 using MeetinAI.Transcript.Model;
 using MeetinAI.Transcript.Helper;
 using System.Text;
 using System.Text.Encodings.Web;
+using Microsoft.Extensions.Configuration;
+
+
+
+
 
 namespace MeetinAI.Transcript.Controllers
 {
@@ -26,15 +33,20 @@ namespace MeetinAI.Transcript.Controllers
         private const string conversationAnalysisPath = "/language/analyze-conversations/jobs";
         private const string conversationAnalysisQuery = "api-version=2022-10-01-preview";
         private const string conversationSummaryModelVersion = "latest";
+        private readonly IConfiguration _configuration;
+        bool result = false;
 
 
 
-        public TranscriptionController ( ILogger<TranscriptionController> logger )
+
+
+        public TranscriptionController ( ILogger<TranscriptionController> logger, IConfiguration configuration )
         {
             _logger = logger;
-            _userConfig = new UserConfig (args: new string[] { "--jsonInput", "your_json_input_value" }, // Add other parameters as needed
+            _userConfig = new UserConfig (args: new string [] { "--jsonInput", "your_json_input_value" }, // Add other parameters as needed
             usage: "your_usage_value");
             // Other initialization...
+            _configuration = configuration;
         }
         //public TranscriptionController ( )
         //{
@@ -46,6 +58,8 @@ namespace MeetinAI.Transcript.Controllers
         {
             try
             {
+
+
                 // Your existing transcription logic here
                 var transcriptionId = await CreateTranscription (audioRequest.AudioUrl);
                 await WaitForTranscription (transcriptionId);
@@ -68,22 +82,52 @@ namespace MeetinAI.Transcript.Controllers
                 var conversationAnalysisUrl = await RequestConversationAnalysis (conversationItems);
                 await WaitForConversationAnalysis (conversationAnalysisUrl);
                 JsonElement conversationAnalysis = await GetConversationAnalysis (conversationAnalysisUrl);
-                var Finalresult =  PrintSimpleOutput (transcriptionPhrases, sentimentAnalysisResults, conversationAnalysis);
-                string jsonResult = JsonSerializer.Serialize (new { transcriptionResult = Finalresult });
+                var Finalresult = PrintSimpleOutput (transcriptionPhrases, sentimentAnalysisResults, conversationAnalysis);
+                
                 // Uncomment the following block if you want to print the full output to a file
                 if (_userConfig.outputFilePath is string outputFilePathValue)
                 {
-                    PrintFullOutput(outputFilePathValue, transcription, sentimentConfidenceScores, transcriptionPhrases, conversationAnalysis);
+                    PrintFullOutput (outputFilePathValue,transcription, sentimentConfidenceScores, transcriptionPhrases, conversationAnalysis);
+                    
+                    string jsonContent = System.IO.File.ReadAllText (outputFilePathValue);
 
+                    if (System.IO.File.Exists(outputFilePathValue))
+                    {
+                        System.IO.File.Delete (outputFilePathValue);
+                    }
+
+                    // Parse JSON content
+                    JsonDocument jsonDocument = JsonDocument.Parse (jsonContent);
+                    JsonElement rootElement = jsonDocument.RootElement;
+
+                    // Convert JSON to XML
+                    XmlDocument xmlDocument = JsonToXmlConversionMethod (rootElement);
+                    string xmlOutput = xmlDocument.OuterXml;
+                    long MeetingId = audioRequest.MeetinId;
+                    SaveMeetingOutput (xmlOutput, MeetingId);
                 }
 
-                // Return the results as needed
-                return Ok (new
-                {
-                    transcription,
-                    jsonResult
-                    
+                var message = result ? "Data saved successfully" : "Error occurred";
+                var status = result ? "200" : "400"; 
+                //if (result)
+                //{
+                //    return Ok (new
+                //    {
+                //        message
+
+                //    }) ;
+                //}
+
+                //else
+                //{
+                //    return BadRequest ("error occured");
+                //}
+                return Ok (new 
+                { 
+                    message,
+                    status
                 });
+
             }
             catch (Exception ex)
             {
@@ -97,6 +141,92 @@ namespace MeetinAI.Transcript.Controllers
                     details = ex.ToString ()
                 });
             }
+        }
+        private XmlDocument JsonToXmlConversionMethod ( JsonElement jsonElement )
+        {
+            XmlDocument xmlDocument = new XmlDocument ();
+            XmlElement rootElement = xmlDocument.CreateElement ("Root");
+            xmlDocument.AppendChild (rootElement);
+
+            AddJsonToXmlElement (xmlDocument, rootElement, jsonElement);
+
+            return xmlDocument;
+        }
+
+        private void AddJsonToXmlElement ( XmlDocument xmlDocument, XmlElement parentNode, JsonElement jsonElement )
+        {
+            switch (jsonElement.ValueKind)
+            {
+                case JsonValueKind.Object:
+                    foreach (var property in jsonElement.EnumerateObject ())
+                    {
+                        XmlElement propertyElement = xmlDocument.CreateElement (property.Name);
+                        parentNode.AppendChild (propertyElement);
+                        AddJsonToXmlElement (xmlDocument, propertyElement, property.Value);
+                    }
+                    break;
+
+                case JsonValueKind.Array:
+                    foreach (var arrayItem in jsonElement.EnumerateArray ())
+                    {
+                        XmlElement itemElement = xmlDocument.CreateElement ("Item");
+                        parentNode.AppendChild (itemElement);
+                        AddJsonToXmlElement (xmlDocument, itemElement, arrayItem);
+                    }
+                    break;
+
+                case JsonValueKind.String:
+                case JsonValueKind.Number:
+                case JsonValueKind.True:
+                case JsonValueKind.False:
+                    parentNode.InnerText = jsonElement.ToString ();
+                    break;
+
+                case JsonValueKind.Null:
+                    // Handle null if needed
+                    break;
+            }
+        }
+
+
+
+        private void SaveMeetingOutput ( string xmlOutput, long meetingId )
+        {
+            try
+            {
+                var connString = _configuration.GetConnectionString ("MeetinAIConnection");
+
+                using (SqlConnection conn = new SqlConnection (connString))
+                {
+
+                    using (SqlCommand cmd = new SqlCommand ("Proc_SaveMettingTranscript", conn))
+                    {
+                        cmd.CommandType = CommandType.StoredProcedure;
+                        cmd.Parameters.AddWithValue ("@MettingId", meetingId);
+                        cmd.Parameters.AddWithValue ("@xmlData", xmlOutput);
+                        //SqlDataAdapter adapter = new SqlDataAdapter ();
+                        conn.Open ();
+                        int rowAffected = cmd.ExecuteNonQuery ();
+                        conn.Close ();
+                        //bool result = false;
+                        if (rowAffected > 0)
+                        {
+                            result = true;
+
+                        }
+                        else
+                        {
+                            result = false;
+                        }
+                    }
+                }
+
+            }
+            catch (Exception ex)
+            {
+
+            }
+
         }
 
         private T ObjectFromJsonElement<T> ( JsonElement element )
@@ -130,7 +260,7 @@ namespace MeetinAI.Transcript.Controllers
 
         private async Task<string> CreateTranscription ( string inputAudioURL )
         {
-            
+
 
             var uri = new UriBuilder (Uri.UriSchemeHttps, this._userConfig?.speechEndpoint);
             uri.Path = speechTranscriptionPath;
@@ -475,7 +605,7 @@ namespace MeetinAI.Transcript.Controllers
             catch (Exception ex)
             {
 
-               
+
             }
             return;
         }
@@ -551,8 +681,9 @@ namespace MeetinAI.Transcript.Controllers
         {
             string [] sentiments = GetSentimentsForSimpleOutput (sentimentAnalysisResults);
             ConversationAnalysisForSimpleOutput conversation = GetConversationAnalysisForSimpleOutput (conversationAnalysis);
-            return GetSimpleOutput (transcriptionPhrases, sentiments, conversation);
-           
+            return (GetSimpleOutput (transcriptionPhrases, sentiments, conversation));
+
+
         }
 
 
@@ -605,7 +736,7 @@ namespace MeetinAI.Transcript.Controllers
             };
         }
 
-        private void PrintFullOutput ( string outputFilePathValue, JsonElement transcription, JsonElement [] sentimentConfidenceScores, TranscriptionPhrase [] transcriptionPhrases, JsonElement conversationAnalysis )
+        private void PrintFullOutput (string outputFilePathValue ,JsonElement transcription, JsonElement [] sentimentConfidenceScores, TranscriptionPhrase [] transcriptionPhrases, JsonElement conversationAnalysis )
         {
             var results = new
             {
@@ -614,7 +745,7 @@ namespace MeetinAI.Transcript.Controllers
             };
 
             // Use a different name for the variable
-            System.IO.File.WriteAllText (outputFilePathValue, JsonSerializer.Serialize (results, new JsonSerializerOptions () { WriteIndented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping }));
+            System.IO.File.WriteAllText( outputFilePathValue,JsonSerializer.Serialize (results, new JsonSerializerOptions () { WriteIndented = true, Encoder = JavaScriptEncoder.Default }));
         }
 
     }
