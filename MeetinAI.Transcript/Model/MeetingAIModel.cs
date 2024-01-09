@@ -5,7 +5,7 @@ namespace MeetinAI.Transcript.Model
 {
     public class AudioRequest
     {
-        public string ? AudioUrl { get; set; }
+        //public string ? AudioUrl { get; set; }
         public long MeetinId { get; set; }
     }
     public class TranscriptionPhrase

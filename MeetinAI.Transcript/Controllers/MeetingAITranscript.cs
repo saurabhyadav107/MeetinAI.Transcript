@@ -9,6 +9,8 @@ using MeetinAI.Transcript.Helper;
 using System.Text;
 using System.Text.Encodings.Web;
 using Microsoft.Extensions.Configuration;
+using Azure.AI.OpenAI;
+using Azure;
 
 
 
@@ -16,13 +18,39 @@ using Microsoft.Extensions.Configuration;
 
 namespace MeetinAI.Transcript.Controllers
 {
-    [Route ("api/[controller]")]
+
+    public class DatabaseHelper
+    {
+        private readonly IConfiguration _configuration;
+        private readonly string _connectionString;
+
+
+        public DatabaseHelper ( IConfiguration configuration )
+        {
+            _configuration = configuration;
+            _connectionString = _configuration.GetConnectionString ("MeetinAIConnection");
+
+        }
+
+        public SqlConnection GetConnection ()
+        {
+            SqlConnection connection = new SqlConnection (_connectionString);
+            connection.Open ();
+            return connection;
+        }
+    }
+
+    [Route ("api/")]
     [ApiController]
     public class TranscriptionController : ControllerBase
     {
         private readonly ILogger<TranscriptionController> _logger;
         private readonly UserConfig _userConfig;
         private const int waitSeconds = 10;
+
+        private readonly DatabaseHelper _databaseHelper;
+
+
 
         // This should not change unless you switch to a new version of the Speech REST API.
         private const string speechTranscriptionPath = "speechtotext/v3.1/transcriptions";
@@ -46,22 +74,18 @@ namespace MeetinAI.Transcript.Controllers
             _userConfig = new UserConfig (args: new string [] { "--jsonInput", "your_json_input_value" }, // Add other parameters as needed
             usage: "your_usage_value");
             // Other initialization...
-            _configuration = configuration;
+            _databaseHelper = new DatabaseHelper (configuration);
         }
-        //public TranscriptionController ( )
-        //{
-        //    this.userConfig = userConfig ?? throw new ArgumentNullException (nameof (userConfig));
-        //}
+       
 
-        [HttpPost ("transcribe")]
+        [HttpPost ("GenerateMeetingTranscript")]
         public async Task<IActionResult> TranscribeAudio ( [FromBody] AudioRequest audioRequest )
         {
             try
             {
 
-
-                // Your existing transcription logic here
-                var transcriptionId = await CreateTranscription (audioRequest.AudioUrl);
+                string getAudioURL = await GetMeetingFiles (audioRequest.MeetinId) ;
+                var transcriptionId = await CreateTranscription (getAudioURL);
                 await WaitForTranscription (transcriptionId);
 
                 // Retrieve the transcription data
@@ -84,7 +108,7 @@ namespace MeetinAI.Transcript.Controllers
                 JsonElement conversationAnalysis = await GetConversationAnalysis (conversationAnalysisUrl);
                 var Finalresult = PrintSimpleOutput (transcriptionPhrases, sentimentAnalysisResults, conversationAnalysis);
                 
-                // Uncomment the following block if you want to print the full output to a file
+
                 if (_userConfig.outputFilePath is string outputFilePathValue)
                 {
                     PrintFullOutput (outputFilePathValue,transcription, sentimentConfidenceScores, transcriptionPhrases, conversationAnalysis);
@@ -96,32 +120,23 @@ namespace MeetinAI.Transcript.Controllers
                         System.IO.File.Delete (outputFilePathValue);
                     }
 
-                    // Parse JSON content
+
                     JsonDocument jsonDocument = JsonDocument.Parse (jsonContent);
                     JsonElement rootElement = jsonDocument.RootElement;
 
-                    // Convert JSON to XML
+
                     XmlDocument xmlDocument = JsonToXmlConversionMethod (rootElement);
                     string xmlOutput = xmlDocument.OuterXml;
                     long MeetingId = audioRequest.MeetinId;
                     SaveMeetingOutput (xmlOutput, MeetingId);
+                    
                 }
+                var generateMeetingResponsesTask = GenerateMeetingResponses (new MeetingTranscriptRequest { MeetingId = audioRequest.MeetinId });
+                await generateMeetingResponsesTask;
 
                 var message = result ? "Data saved successfully" : "Error occurred";
                 var status = result ? "200" : "400"; 
-                //if (result)
-                //{
-                //    return Ok (new
-                //    {
-                //        message
 
-                //    }) ;
-                //}
-
-                //else
-                //{
-                //    return BadRequest ("error occured");
-                //}
                 return Ok (new 
                 { 
                     message,
@@ -131,17 +146,215 @@ namespace MeetinAI.Transcript.Controllers
             }
             catch (Exception ex)
             {
-                // Log the exception details
                 _logger.LogError (ex, "An error occurred during transcription.");
 
-                // Return a more detailed response
                 return BadRequest (new
                 {
                     error = "An error occurred during transcription.",
                     details = ex.ToString ()
                 });
             }
+        
         }
+
+        [HttpPost ("GenerateMeetingResponses")]
+        public async Task<IActionResult> GenerateMeetingResponses ( [FromBody] MeetingTranscriptRequest meetingTranscriptRequest )
+        {
+            try
+            {
+                List<PromptData> prompts = new ();
+                List<MeetingTranscript> getTranscript = new ();
+                (getTranscript, long mmtid) = await GetMeetingTranscript (meetingTranscriptRequest.MeetingId);
+                var jsondata = JsonSerializer.Serialize (getTranscript);
+                prompts = await GetPrompts ();
+                foreach (var prompt in prompts)
+                {
+                    var getPromptResponses = await GeneratePromptResponses (jsondata, prompt.PText);
+
+                    SavePromptResponses (mmtid, getPromptResponses, prompt.PId);
+                }
+                var message = result ? "Data saved successfully" : "Error occurred";
+                var status = result ? "200" : "400";
+
+
+                return Ok (new
+                {
+                    message,
+                    status
+                });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest (new { error = $"An error occurred: {ex.Message}" });
+            }
+        }
+
+
+        private async Task<string> GetMeetingFiles ( long MeetingId )
+        {
+            using (SqlConnection connection = _databaseHelper.GetConnection ())
+            {               
+
+                using (SqlCommand command = new SqlCommand ("proc_GetMeetingFiles", connection))
+                {
+                    command.CommandType = CommandType.StoredProcedure;
+                    command.Parameters.AddWithValue ("@MID", MeetingId);
+
+                    var fileName = await command.ExecuteScalarAsync ();
+
+                    return fileName?.ToString () ?? string.Empty;
+                }
+            }
+        }
+        private async Task<(List<MeetingTranscript>, long)> GetMeetingTranscript ( long meetingId )
+        {
+            try
+            {
+                long mmtid = 0;
+                using (SqlConnection connection = _databaseHelper.GetConnection ())
+                {
+                    using (SqlCommand command = new SqlCommand ("Proc_GetMeetingTranscript", connection))
+                    {
+                        command.CommandType = System.Data.CommandType.StoredProcedure;
+                        command.Parameters.AddWithValue ("@MeetingId", meetingId);
+                        using (SqlDataReader reader = command.ExecuteReader ())
+                        {
+                            List<MeetingTranscript> transcripts = new List<MeetingTranscript> ();
+
+                            while (reader.Read ())
+                            {
+                                mmtid = reader.GetInt64 (reader.GetOrdinal ("MMTId"));
+                                MeetingTranscript transcript = new MeetingTranscript
+                                {
+                                    Speaker = reader.GetString (reader.GetOrdinal ("Speaker")),
+                                    Display = reader.GetString (reader.GetOrdinal ("Display"))
+                                };
+
+                                transcripts.Add (transcript);
+                            }
+                            //string json = JsonConvert.SerializeObject (transcripts, Formatting.Indented);
+                            return (transcripts, mmtid);
+                        }
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                throw;
+            }
+        }
+
+        private async Task<List<PromptData>> GetPrompts ()
+        {
+            try
+            {
+                using (SqlConnection connection = _databaseHelper.GetConnection ())
+                {
+                    using (SqlCommand command = new SqlCommand ("Proc_GetPrompts", connection))
+                    {
+                        command.CommandType = System.Data.CommandType.StoredProcedure;
+                        List<PromptData> prompts = new List<PromptData> ();
+
+                        using (SqlDataReader reader = command.ExecuteReader ())
+                        {
+                            while (reader.Read ())
+                            {
+                                PromptData promptData = new PromptData
+                                {
+                                    PId = reader.GetInt64 (0),
+                                    PText = reader.GetString (1)
+                                };
+                                prompts.Add (promptData);
+                            }
+                        }
+                        return prompts;
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // Handle the exception or rethrow it as needed
+                throw;
+            }
+        }
+
+
+        private async Task<string> GeneratePromptResponses ( string transcript, string promptText )
+        {
+            try
+            {
+                OpenAIClient client = new OpenAIClient (
+            new Uri ("https://chipsoftopanai.openai.azure.com/"),
+            new AzureKeyCredential ("fcc4301809c043cc94bda7fe5babfa86")
+        );
+                var options = new ChatCompletionsOptions
+                {
+                    Messages ={
+            new ChatRequestSystemMessage(transcript),
+            new ChatRequestUserMessage(promptText),
+
+            },
+                    DeploymentName = "gpt-35-turbo",
+                    Temperature = (float) 0.7,
+                    MaxTokens = 800,
+                    NucleusSamplingFactor = (float) 0.95,
+                    FrequencyPenalty = 0,
+                    PresencePenalty = 0,
+
+                };
+
+                var response = await client.GetChatCompletionsAsync (options);
+
+                var generatedText = response?.Value?.Choices?.FirstOrDefault ()?.Message?.Content;
+
+                return generatedText ?? "No response from OpenAI.";
+            }
+            catch (Exception ex)
+            {
+                throw new Exception ($"An error occurred while generating prompt responses: {ex.Message}");
+            }
+        }
+
+
+        private void SavePromptResponses ( long mmtid, string getPromptResponses, long promptid )
+        {
+            try
+            {
+
+                using (SqlConnection connection = _databaseHelper.GetConnection ())
+                {
+
+                    using (SqlCommand cmd = new SqlCommand ("Proc_SavePromptResponse", connection))
+                    {
+                        cmd.CommandType = CommandType.StoredProcedure;
+                        cmd.Parameters.AddWithValue ("@MMTId", mmtid);
+                        cmd.Parameters.AddWithValue ("@PId", promptid);
+                        cmd.Parameters.AddWithValue ("@PResponse", getPromptResponses);
+                        //SqlDataAdapter adapter = new SqlDataAdapter ();
+                        int rowAffected = cmd.ExecuteNonQuery ();
+                        connection.Close ();
+                        //bool result = false;
+                        if (rowAffected > 0)
+                        {
+                            result = true;
+
+                        }
+                        else
+                        {
+                            result = false;
+                        }
+                    }
+                }
+
+            }
+            catch (Exception ex)
+            {
+
+            }
+
+        }
+
+
         private XmlDocument JsonToXmlConversionMethod ( JsonElement jsonElement )
         {
             XmlDocument xmlDocument = new XmlDocument ();
@@ -189,25 +402,21 @@ namespace MeetinAI.Transcript.Controllers
         }
 
 
-
         private void SaveMeetingOutput ( string xmlOutput, long meetingId )
         {
             try
             {
-                var connString = _configuration.GetConnectionString ("MeetinAIConnection");
-
-                using (SqlConnection conn = new SqlConnection (connString))
+                using (SqlConnection connection = _databaseHelper.GetConnection ())
                 {
 
-                    using (SqlCommand cmd = new SqlCommand ("Proc_SaveMettingTranscript", conn))
+                    using (SqlCommand cmd = new SqlCommand ("Proc_SaveMettingTranscript", connection))
                     {
                         cmd.CommandType = CommandType.StoredProcedure;
                         cmd.Parameters.AddWithValue ("@MettingId", meetingId);
                         cmd.Parameters.AddWithValue ("@xmlData", xmlOutput);
                         //SqlDataAdapter adapter = new SqlDataAdapter ();
-                        conn.Open ();
                         int rowAffected = cmd.ExecuteNonQuery ();
-                        conn.Close ();
+                        connection.Close ();
                         //bool result = false;
                         if (rowAffected > 0)
                         {
