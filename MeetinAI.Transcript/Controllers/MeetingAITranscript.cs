@@ -76,7 +76,7 @@ namespace MeetinAI.Transcript.Controllers
             // Other initialization...
             _databaseHelper = new DatabaseHelper (configuration);
         }
-       
+
 
         [HttpPost ("GenerateMeetingTranscript")]
         public async Task<IActionResult> TranscribeAudio ( [FromBody] AudioRequest audioRequest )
@@ -84,7 +84,7 @@ namespace MeetinAI.Transcript.Controllers
             try
             {
 
-                string getAudioURL = await GetMeetingFiles (audioRequest.MeetinId) ;
+                string getAudioURL = await GetMeetingFiles (audioRequest.MeetinId);
                 var transcriptionId = await CreateTranscription (getAudioURL);
                 await WaitForTranscription (transcriptionId);
 
@@ -107,15 +107,15 @@ namespace MeetinAI.Transcript.Controllers
                 await WaitForConversationAnalysis (conversationAnalysisUrl);
                 JsonElement conversationAnalysis = await GetConversationAnalysis (conversationAnalysisUrl);
                 var Finalresult = PrintSimpleOutput (transcriptionPhrases, sentimentAnalysisResults, conversationAnalysis);
-                
+
 
                 if (_userConfig.outputFilePath is string outputFilePathValue)
                 {
-                    PrintFullOutput (outputFilePathValue,transcription, sentimentConfidenceScores, transcriptionPhrases, conversationAnalysis);
-                    
+                    PrintFullOutput (outputFilePathValue, transcription, sentimentConfidenceScores, transcriptionPhrases, conversationAnalysis);
+
                     string jsonContent = System.IO.File.ReadAllText (outputFilePathValue);
 
-                    if (System.IO.File.Exists(outputFilePathValue))
+                    if (System.IO.File.Exists (outputFilePathValue))
                     {
                         System.IO.File.Delete (outputFilePathValue);
                     }
@@ -129,16 +129,16 @@ namespace MeetinAI.Transcript.Controllers
                     string xmlOutput = xmlDocument.OuterXml;
                     long MeetingId = audioRequest.MeetinId;
                     SaveMeetingOutput (xmlOutput, MeetingId);
-                    
+
                 }
                 var generateMeetingResponsesTask = GenerateMeetingResponses (new MeetingTranscriptRequest { MeetingId = audioRequest.MeetinId });
                 await generateMeetingResponsesTask;
 
                 var message = result ? "Data saved successfully" : "Error occurred";
-                var status = result ? "200" : "400"; 
+                var status = result ? "200" : "400";
 
-                return Ok (new 
-                { 
+                return Ok (new
+                {
                     message,
                     status
                 });
@@ -154,7 +154,7 @@ namespace MeetinAI.Transcript.Controllers
                     details = ex.ToString ()
                 });
             }
-        
+
         }
 
         [HttpPost ("GenerateMeetingResponses")]
@@ -193,7 +193,7 @@ namespace MeetinAI.Transcript.Controllers
         private async Task<string> GetMeetingFiles ( long MeetingId )
         {
             using (SqlConnection connection = _databaseHelper.GetConnection ())
-            {               
+            {
 
                 using (SqlCommand command = new SqlCommand ("proc_GetMeetingFiles", connection))
                 {
@@ -945,7 +945,7 @@ namespace MeetinAI.Transcript.Controllers
             };
         }
 
-        private void PrintFullOutput (string outputFilePathValue ,JsonElement transcription, JsonElement [] sentimentConfidenceScores, TranscriptionPhrase [] transcriptionPhrases, JsonElement conversationAnalysis )
+        private void PrintFullOutput ( string outputFilePathValue, JsonElement transcription, JsonElement [] sentimentConfidenceScores, TranscriptionPhrase [] transcriptionPhrases, JsonElement conversationAnalysis )
         {
             var results = new
             {
@@ -954,7 +954,7 @@ namespace MeetinAI.Transcript.Controllers
             };
 
             // Use a different name for the variable
-            System.IO.File.WriteAllText( outputFilePathValue,JsonSerializer.Serialize (results, new JsonSerializerOptions () { WriteIndented = true, Encoder = JavaScriptEncoder.Default }));
+            System.IO.File.WriteAllText (outputFilePathValue, JsonSerializer.Serialize (results, new JsonSerializerOptions () { WriteIndented = true, Encoder = JavaScriptEncoder.Default }));
         }
 
     }
