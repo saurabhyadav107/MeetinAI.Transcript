@@ -8,13 +8,13 @@ using MeetinAI.Transcript.Model;
 using MeetinAI.Transcript.Helper;
 using System.Text;
 using System.Text.Encodings.Web;
-using Microsoft.Extensions.Configuration;
 using Azure.AI.OpenAI;
 using Azure;
+using Newtonsoft.Json.Linq;
 
 
 
-
+    
 
 namespace MeetinAI.Transcript.Controllers
 {
@@ -77,9 +77,8 @@ namespace MeetinAI.Transcript.Controllers
             _databaseHelper = new DatabaseHelper (configuration);
         }
 
-
-        [HttpPost ("GenerateMeetingTranscript")]
-        public async Task<IActionResult> TranscribeAudio ( [FromBody] AudioRequest audioRequest )
+        [HttpGet ("GenerateMeetingTranscript")]
+        public async Task<IActionResult> TranscribeAudio ([FromQuery]AudioRequest audioRequest )
         {
             try
             {
@@ -157,8 +156,8 @@ namespace MeetinAI.Transcript.Controllers
 
         }
 
-        [HttpPost ("GenerateMeetingResponses")]
-        public async Task<IActionResult> GenerateMeetingResponses ( [FromBody] MeetingTranscriptRequest meetingTranscriptRequest )
+        [HttpGet ("GenerateMeetingResponses")]
+        public async Task<IActionResult> GenerateMeetingResponses ( [FromQuery] MeetingTranscriptRequest meetingTranscriptRequest )
         {
             try
             {
@@ -166,12 +165,13 @@ namespace MeetinAI.Transcript.Controllers
                 List<MeetingTranscript> getTranscript = new ();
                 (getTranscript, long mmtid) = await GetMeetingTranscript (meetingTranscriptRequest.MeetingId);
                 var jsondata = JsonSerializer.Serialize (getTranscript);
+                string response = ProcessJsonData (jsondata);
                 prompts = await GetPrompts ();
                 foreach (var prompt in prompts)
                 {
-                    var getPromptResponses = await GeneratePromptResponses (jsondata, prompt.PText);
+                    var getPromptResponses = await GeneratePromptResponses (response, prompt.PText);
 
-                    SavePromptResponses (mmtid, getPromptResponses, prompt.PId);
+                     SavePromptResponses (mmtid, getPromptResponses, prompt.PId);
                 }
                 var message = result ? "Data saved successfully" : "Error occurred";
                 var status = result ? "200" : "400";
@@ -189,7 +189,32 @@ namespace MeetinAI.Transcript.Controllers
             }
         }
 
+        static string ProcessJsonData ( string jsonData )
+        {
+            try
+            {
 
+                JArray jsonArray = JArray.Parse (jsonData);
+
+                string response = "";
+
+                foreach (var jsonObject in jsonArray)
+                {
+                    string speaker = jsonObject ["Speaker"].ToString ();
+                    string display = jsonObject ["Display"].ToString ();
+
+                    string textFormat = $"{speaker} - {display}";
+
+                    response += textFormat + Environment.NewLine;
+                }
+
+                return response;
+            }
+            catch (Exception ex)
+            {
+                return $"Error processing JSON data: {ex.Message}";
+            }
+        }
         private async Task<string> GetMeetingFiles ( long MeetingId )
         {
             using (SqlConnection connection = _databaseHelper.GetConnection ())
@@ -290,11 +315,11 @@ namespace MeetinAI.Transcript.Controllers
                 var options = new ChatCompletionsOptions
                 {
                     Messages ={
-            new ChatRequestSystemMessage(transcript),
-            new ChatRequestUserMessage(promptText),
+                        new ChatRequestUserMessage(promptText),
+                        new ChatRequestSystemMessage(transcript)
 
             },
-                    DeploymentName = "gpt-35-turbo",
+                    DeploymentName = "gpt-35-turbo-16k",
                     Temperature = (float) 0.7,
                     MaxTokens = 800,
                     NucleusSamplingFactor = (float) 0.95,
@@ -512,17 +537,17 @@ namespace MeetinAI.Transcript.Controllers
 
         private async Task<bool> GetTranscriptionStatus ( string transcriptionId )
         {
-            var uri = new UriBuilder (Uri.UriSchemeHttps, this._userConfig.speechEndpoint!);
-            uri.Path = $"{speechTranscriptionPath}/{transcriptionId}";
+                var uri = new UriBuilder (Uri.UriSchemeHttps, this._userConfig.speechEndpoint!);
+                uri.Path = $"{speechTranscriptionPath}/{transcriptionId}";
             var response = await RestHelper.SendGet (uri.Uri.ToString (), this._userConfig.speechSubscriptionKey!, new HttpStatusCode [] { HttpStatusCode.OK });
-            using (JsonDocument document = JsonDocument.Parse (response.content))
-            {
+                using (JsonDocument document = JsonDocument.Parse (response.content))
+                {
                 if (0 == string.Compare ("Failed", document.RootElement.Clone ().GetProperty ("status").ToString (), StringComparison.InvariantCultureIgnoreCase))
-                {
-                    throw new Exception ($"Unable to transcribe audio input. Response:{Environment.NewLine}{response.content}");
-                }
+                    {
+                        throw new Exception ($"Unable to transcribe audio input. Response:{Environment.NewLine}{response.content}");
+                    }
                 else
-                {
+            {
                     return 0 == string.Compare ("Succeeded", document.RootElement.Clone ().GetProperty ("status").ToString (), StringComparison.InvariantCultureIgnoreCase);
                 }
             }
@@ -532,8 +557,7 @@ namespace MeetinAI.Transcript.Controllers
         {
             var done = false;
             while (!done)
-            {
-                Console.WriteLine ($"Waiting {waitSeconds} seconds for transcription to complete.");
+            {               
                 Thread.Sleep (waitSeconds * 1000);
                 done = await GetTranscriptionStatus (transcriptionId);
             }
